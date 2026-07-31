@@ -191,8 +191,8 @@ export const getValue = internalQuery({
   },
 });
 
-// Seed default integrations
-export const seed = internalMutation({
+// Seed default integrations (idempotent — only inserts missing slugs)
+export const seed = mutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
