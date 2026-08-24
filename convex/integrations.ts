@@ -176,6 +176,43 @@ export const getValues = internalQuery({
   },
 });
 
+export const setValueInternal = internalMutation({
+  args: {
+    integrationSlug: v.string(),
+    key: v.string(),
+    value: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("integrationValues")
+      .withIndex("by_slug_key", (q) =>
+        q.eq("integrationSlug", args.integrationSlug).eq("key", args.key),
+      )
+      .unique();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, { value: args.value });
+    } else {
+      await ctx.db.insert("integrationValues", {
+        integrationSlug: args.integrationSlug,
+        key: args.key,
+        value: args.value,
+      });
+    }
+
+    await ctx.db.insert("actionLogs", {
+      action: "credential_updated",
+      detail: `Updated ${args.key} for ${args.integrationSlug} (via admin sync API)`,
+      integrationSlug: args.integrationSlug,
+      timestamp: Date.now(),
+      status: "success",
+    });
+
+    return null;
+  },
+});
+
 export const getValue = internalQuery({
   args: { integrationSlug: v.string(), key: v.string() },
   returns: v.union(v.string(), v.null()),
@@ -191,8 +228,8 @@ export const getValue = internalQuery({
   },
 });
 
-// Seed default integrations (idempotent — only inserts missing slugs)
-export const seed = mutation({
+// Seed default integrations
+export const seed = internalMutation({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
