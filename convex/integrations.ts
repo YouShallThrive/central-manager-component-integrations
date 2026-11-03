@@ -4,6 +4,53 @@
 import { v } from "convex/values";
 import { query, mutation, internalQuery, internalMutation } from "./_generated/server";
 
+// Truncated preview of a secret value for the public fieldStatus projection
+// (never the full value). Mirrors prod's configurable-integrations denorm.
+function previewOf(value: string, type: string): string | undefined {
+  if (type === "password") return `…${value.slice(-8)}`;
+  if (type === "url") return value.slice(0, 40) + (value.length > 40 ? "…" : "");
+  return `…${value.slice(-8)}`;
+}
+
+// Denormalized fieldStatus array derived from an integration's field defs and
+// its stored values. Persisted onto the integration row so `list` stays a
+// self-contained read (matching the imported prod snapshot).
+function fieldStatusFor(
+  fields: Array<{ key: string; type: string; [k: string]: unknown }>,
+  valueMap: Map<string, string>,
+) {
+  return fields.map((f) => {
+    const val = valueMap.get(f.key);
+    return {
+      key: f.key,
+      hasValue: !!val,
+      preview: val ? previewOf(val, f.type) : undefined,
+    };
+  });
+}
+
+// Recompute + persist the denormalized `configured` / `fieldStatus` on an
+// integration definition after its values change (so the public list row stays
+// accurate without joining integrationValues).
+async function recomputeIntegrationStatus(ctx: any, integrationSlug: string) {
+  const integration = await ctx.db
+    .query("integrations")
+    .withIndex("by_slug", (q: any) => q.eq("slug", integrationSlug))
+    .unique();
+  if (!integration) return;
+
+  const values = await ctx.db
+    .query("integrationValues")
+    .withIndex("by_slug", (q: any) => q.eq("integrationSlug", integrationSlug))
+    .collect();
+  const valueMap = new Map(values.map((v: any) => [v.key, v.value]));
+
+  await ctx.db.patch(integration._id, {
+    configured: values.length > 0,
+    fieldStatus: fieldStatusFor(integration.fields, valueMap),
+  });
+}
+
 // List all integrations (with status but no secret values)
 export const list = query({
   args: {},
@@ -35,27 +82,31 @@ export const list = query({
     const result = [];
 
     for (const integration of integrations) {
+      // Prefer the denormalized fields (imported prod snapshot, and every write
+      // since the redesign). Fall back to computing from integrationValues for
+      // any legacy row that predates denormalization.
+      if (integration.fieldStatus !== undefined || integration.configured !== undefined) {
+        result.push({
+          _id: integration._id,
+          slug: integration.slug,
+          name: integration.name,
+          description: integration.description,
+          icon: integration.icon,
+          color: integration.color,
+          category: integration.category,
+          fields: integration.fields,
+          enabled: integration.enabled,
+          configured: integration.configured ?? false,
+          fieldStatus: integration.fieldStatus ?? fieldStatusFor(integration.fields, new Map()),
+        });
+        continue;
+      }
+
       const values = await ctx.db
         .query("integrationValues")
         .withIndex("by_slug", (q) => q.eq("integrationSlug", integration.slug))
         .collect();
-
       const valueMap = new Map(values.map((v) => [v.key, v.value]));
-
-      const fieldStatus = integration.fields.map((f) => {
-        const val = valueMap.get(f.key);
-        return {
-          key: f.key,
-          hasValue: !!val,
-          preview: val
-            ? f.type === "password"
-              ? `…${val.slice(-8)}`
-              : f.type === "url"
-                ? val.slice(0, 40) + (val.length > 40 ? "…" : "")
-                : `…${val.slice(-8)}`
-            : undefined,
-        };
-      });
 
       result.push({
         _id: integration._id,
@@ -68,7 +119,7 @@ export const list = query({
         fields: integration.fields,
         enabled: integration.enabled,
         configured: values.length > 0,
-        fieldStatus,
+        fieldStatus: fieldStatusFor(integration.fields, valueMap),
       });
     }
 
@@ -102,6 +153,8 @@ export const setValue = mutation({
       });
     }
 
+    await recomputeIntegrationStatus(ctx, args.integrationSlug);
+
     await ctx.db.insert("actionLogs", {
       action: "credential_updated",
       detail: `Updated ${args.key} for ${args.integrationSlug}`,
@@ -132,6 +185,8 @@ export const removeValue = mutation({
     if (existing) {
       await ctx.db.delete(existing._id);
     }
+
+    await recomputeIntegrationStatus(ctx, args.integrationSlug);
 
     await ctx.db.insert("actionLogs", {
       action: "credential_removed",
@@ -200,6 +255,8 @@ export const setValueInternal = internalMutation({
         value: args.value,
       });
     }
+
+    await recomputeIntegrationStatus(ctx, args.integrationSlug);
 
     await ctx.db.insert("actionLogs", {
       action: "credential_updated",
@@ -322,7 +379,11 @@ export const seed = internalMutation({
         .unique();
 
       if (!existing) {
-        await ctx.db.insert("integrations", def);
+        await ctx.db.insert("integrations", {
+          ...def,
+          configured: false,
+          fieldStatus: fieldStatusFor(def.fields, new Map()),
+        });
       }
     }
 

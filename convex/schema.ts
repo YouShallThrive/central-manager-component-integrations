@@ -21,6 +21,16 @@ const schema = defineSchema({
       required: v.optional(v.boolean()),
     })),
     enabled: v.boolean(),
+    // Configurable-integrations (prod parity): `configured` + `fieldStatus` are
+    // denormalized onto the definition row so the public `integrations:list`
+    // snapshot is self-contained (no join into integrationValues). The secret
+    // values themselves stay in the integrationValues table (not listed publicly).
+    configured: v.boolean(),
+    fieldStatus: v.array(v.object({
+      key: v.string(),
+      hasValue: v.boolean(),
+      preview: v.optional(v.string()),
+    })),
   }).index("by_slug", ["slug"])
     .index("by_category", ["category"]),
 
