@@ -43,7 +43,7 @@ async function recomputeIntegrationStatus(ctx: any, integrationSlug: string) {
     .query("integrationValues")
     .withIndex("by_slug", (q: any) => q.eq("integrationSlug", integrationSlug))
     .collect();
-  const valueMap = new Map(values.map((v: any) => [v.key, v.value]));
+  const valueMap = new Map<string, string>(values.map((v: any) => [v.key, v.value] as [string, string]));
 
   await ctx.db.patch(integration._id, {
     configured: values.length > 0,
